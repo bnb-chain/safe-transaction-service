@@ -16,7 +16,7 @@ from safe_transaction_service.tokens.serializers import \
     TokenInfoResponseSerializer
 
 from .helpers import DelegateSignatureHelper
-from .indexers.tx_decoder import TxDecoderException, get_tx_decoder
+from .indexers.tx_decoder import TxDecoderException, get_db_tx_decoder
 from .models import (ConfirmationType, EthereumTx, ModuleTransaction,
                      MultisigConfirmation, MultisigTransaction, SafeContract,
                      SafeContractDelegate)
@@ -24,7 +24,7 @@ from .services.safe_service import SafeCreationInfo
 
 
 def get_data_decoded_from_data(data: bytes):
-    tx_decoder = get_tx_decoder()
+    tx_decoder = get_db_tx_decoder()
     try:
         return tx_decoder.get_data_decoded(data)
     except TxDecoderException:
@@ -35,7 +35,7 @@ def get_data_decoded_from_data(data: bytes):
 #            Request Serializers
 # ================================================ #
 class SafeMultisigConfirmationSerializer(serializers.Serializer):
-    signature = HexadecimalField(min_length=130)  # Signatures must be at least 65 bytes
+    signature = HexadecimalField(min_length=65)  # Signatures must be at least 65 bytes
 
     def validate_signature(self, signature: bytes):
         safe_tx_hash = self.context['safe_tx_hash']
@@ -97,7 +97,7 @@ class SafeMultisigTransactionSerializer(SafeMultisigTxSerializerV1):
     contract_transaction_hash = Sha3HashField()
     sender = EthereumAddressField()
     # TODO Make signature mandatory
-    signature = HexadecimalField(required=False, min_length=130)  # Signatures must be at least 65 bytes
+    signature = HexadecimalField(required=False, min_length=65)  # Signatures must be at least 65 bytes
     origin = serializers.CharField(max_length=100, allow_null=True, default=None)
 
     def validate(self, data):
@@ -228,7 +228,7 @@ class SafeMultisigTransactionSerializer(SafeMultisigTxSerializerV1):
 class SafeDelegateDeleteSerializer(serializers.Serializer):
     safe = EthereumAddressField()
     delegate = EthereumAddressField()
-    signature = HexadecimalField(min_length=130)
+    signature = HexadecimalField(min_length=65)
 
     def check_signature(self, signature: bytes, operation_hash: bytes, safe_owners: List[str]) -> Optional[str]:
         """
@@ -498,9 +498,9 @@ class TransferResponseSerializer(serializers.Serializer):
     block_number = serializers.IntegerField()
     transaction_hash = Sha3HashField()
     to = EthereumAddressField()
-    from_ = EthereumAddressField(source='_from')
-    value = serializers.CharField()
-    token_id = serializers.CharField()
+    from_ = EthereumAddressField(source='_from', allow_zero_address=True)
+    value = serializers.CharField(allow_null=True)
+    token_id = serializers.CharField(allow_null=True)
     token_address = EthereumAddressField(allow_null=True, default=None)
 
     def get_fields(self):
@@ -521,20 +521,35 @@ class TransferResponseSerializer(serializers.Serializer):
 
         return TransferType.UNKNOWN
 
+    def validate(self, data):
+        super().validate(data)
+        if data['value'] is None and data['token_id'] is None:
+            raise ValidationError('Both value and token_id cannot be null')
+        return data
+
 
 class TransferWithTokenInfoResponseSerializer(TransferResponseSerializer):
     token_info = TokenInfoResponseSerializer(source='token')
 
     def get_type(self, obj: Dict[str, Any]) -> str:
-        # Sometimes ERC20/721 `Transfer` events look the same, if token info is available better use that information
-        # to check
+        """
+        Sometimes ERC20/721 `Transfer` events look the same, if token info is available better use that information
+        to check
+        :param obj:
+        :return: `TransferType` as a string
+        """
         transfer_type = super().get_type(obj)
         if transfer_type in (TransferType.ERC20_TRANSFER.name, TransferType.ERC721_TRANSFER.name):
             if token := obj['token']:
-                if token.decimals is None:
+                decimals = token['decimals'] if isinstance(token, dict) else token.decimals
+                if decimals is None:
                     transfer_type = TransferType.ERC721_TRANSFER.name
+                    if obj['token_id'] is None:
+                        obj['token_id'], obj['value'] = obj['value'], obj['token_id']
                 else:
                     transfer_type = TransferType.ERC20_TRANSFER.name
+                    if obj['value'] is None:
+                        obj['token_id'], obj['value'] = obj['value'], obj['token_id']
         return transfer_type
 
 

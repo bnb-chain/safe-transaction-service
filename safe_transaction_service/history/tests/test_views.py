@@ -129,18 +129,42 @@ class TestViews(SafeTestCaseMixin, APITestCase):
         for transfer_not_empty, transaction in zip(transfers_not_empty, response.data['results']):
             self.assertEqual(bool(transaction['transfers']), transfer_not_empty)
 
-    def test_all_transactions_wrong_transfer_type_view(self):
+    def test_all_transactions_executed(self):
         safe_address = Account.create().address
-        erc20_transfer_out = EthereumEventFactory(from_=safe_address)
+
+        # No mined
+        MultisigTransactionFactory(safe=safe_address, ethereum_tx=None)
+        MultisigTransactionFactory(safe=safe_address, ethereum_tx=None)
+        # Mine tx with higher nonce, all should appear
+        MultisigTransactionFactory(safe=safe_address)
+
+        response = self.client.get(reverse('v1:all-transactions', args=(safe_address,))
+                                   + '?executed=False&queued=True&trusted=False')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 3)
+
+        response = self.client.get(reverse('v1:all-transactions', args=(safe_address,))
+                                   + '?executed=True&queued=True&trusted=False')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)
+
+    def test_all_transactions_wrong_transfer_type_view(self):
+        # No token in database, so we must trust the event
+        safe_address = Account.create().address
+        erc20_transfer_out = EthereumEventFactory(from_=safe_address)  # ERC20 event (with `value`)
         response = self.client.get(reverse('v1:all-transactions', args=(safe_address,)) + '?queued=False&trusted=True')
         self.assertEqual(response.data['count'], 1)
         self.assertEqual(response.data['results'][0]['transfers'][0]['type'], TransferType.ERC20_TRANSFER.name)
+        self.assertIsNone(response.data['results'][0]['transfers'][0]['token_id'])
+        self.assertIsNotNone(response.data['results'][0]['transfers'][0]['value'])
 
         # Result should be the same, as we are adding an ERC20 token
         token = TokenFactory(address=erc20_transfer_out.address, decimals=18)
         response = self.client.get(reverse('v1:all-transactions', args=(safe_address,)) + '?queued=False&trusted=True')
         self.assertEqual(response.data['count'], 1)
         self.assertEqual(response.data['results'][0]['transfers'][0]['type'], TransferType.ERC20_TRANSFER.name)
+        self.assertIsNone(response.data['results'][0]['transfers'][0]['token_id'])
+        self.assertIsNotNone(response.data['results'][0]['transfers'][0]['value'])
 
         # Result should change if we set the token as an ERC721
         token.decimals = None
@@ -148,6 +172,19 @@ class TestViews(SafeTestCaseMixin, APITestCase):
         response = self.client.get(reverse('v1:all-transactions', args=(safe_address,)) + '?queued=False&trusted=True')
         self.assertEqual(response.data['count'], 1)
         self.assertEqual(response.data['results'][0]['transfers'][0]['type'], TransferType.ERC721_TRANSFER.name)
+        # TokenId and Value must be swapped now
+        self.assertIsNone(response.data['results'][0]['transfers'][0]['value'])
+        self.assertIsNotNone(response.data['results'][0]['transfers'][0]['token_id'])
+
+        # It should work with value=0
+        safe_address = Account.create().address
+        erc20_transfer_out = EthereumEventFactory(from_=safe_address, value=0)  # ERC20 event (with `value`)
+        token = TokenFactory(address=erc20_transfer_out.address, decimals=18)
+        response = self.client.get(reverse('v1:all-transactions', args=(safe_address,)) + '?queued=False&trusted=True')
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['transfers'][0]['type'], TransferType.ERC20_TRANSFER.name)
+        self.assertIsNone(response.data['results'][0]['transfers'][0]['token_id'])
+        self.assertEqual(response.data['results'][0]['transfers'][0]['value'], '0')
 
     def test_get_module_transactions(self):
         safe_address = Account.create().address
@@ -989,6 +1026,7 @@ class TestViews(SafeTestCaseMixin, APITestCase):
 
         token_value = 6
         ethereum_erc_20_event = EthereumEventFactory(to=safe_address, value=token_value)
+        token = TokenFactory(address=ethereum_erc_20_event.address)
         response = self.client.get(reverse('v1:incoming-transfers', args=(safe_address,)), format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 2)
@@ -1001,7 +1039,15 @@ class TestViews(SafeTestCaseMixin, APITestCase):
              'value': str(token_value),
              'tokenId': None,
              'tokenAddress': ethereum_erc_20_event.address,
-             'from': ethereum_erc_20_event.arguments['from']
+             'from': ethereum_erc_20_event.arguments['from'],
+             'tokenInfo': {
+                 'type': 'ERC20',
+                 'address': token.address,
+                 'name': token.name,
+                 'symbol': token.symbol,
+                 'decimals': token.decimals,
+                 'logoUri': token.get_full_logo_uri(),
+             },
              },
             {'type': TransferType.ETHER_TRANSFER.name,
              'executionDate': internal_tx.ethereum_tx.block.timestamp.isoformat().replace('+00:00', 'Z'),
@@ -1012,6 +1058,7 @@ class TestViews(SafeTestCaseMixin, APITestCase):
              'tokenId': None,
              'tokenAddress': None,
              'from': internal_tx._from,
+             'tokenInfo': None,
              },
         ])
 
@@ -1029,7 +1076,8 @@ class TestViews(SafeTestCaseMixin, APITestCase):
              'value': None,
              'tokenId': str(token_id),
              'tokenAddress': ethereum_erc_721_event.address,
-             'from': ethereum_erc_721_event.arguments['from']
+             'from': ethereum_erc_721_event.arguments['from'],
+             'tokenInfo': None,
              },
             {'type': TransferType.ERC20_TRANSFER.name,
              'executionDate': ethereum_erc_20_event.ethereum_tx.block.timestamp.isoformat().replace('+00:00', 'Z'),
@@ -1039,7 +1087,15 @@ class TestViews(SafeTestCaseMixin, APITestCase):
              'value': str(token_value),
              'tokenId': None,
              'tokenAddress': ethereum_erc_20_event.address,
-             'from': ethereum_erc_20_event.arguments['from']
+             'from': ethereum_erc_20_event.arguments['from'],
+             'tokenInfo': {
+                 'type': 'ERC20',
+                 'address': token.address,
+                 'name': token.name,
+                 'symbol': token.symbol,
+                 'decimals': token.decimals,
+                 'logoUri': token.get_full_logo_uri(),
+             },
              },
             {'type': TransferType.ETHER_TRANSFER.name,
              'executionDate': internal_tx.ethereum_tx.block.timestamp.isoformat().replace('+00:00', 'Z'),
@@ -1050,6 +1106,7 @@ class TestViews(SafeTestCaseMixin, APITestCase):
              'tokenId': None,
              'tokenAddress': None,
              'from': internal_tx._from,
+             'tokenInfo': None,
              },
         ])
 
@@ -1104,6 +1161,7 @@ class TestViews(SafeTestCaseMixin, APITestCase):
         token_value = 6
         ethereum_erc_20_event = EthereumEventFactory(to=safe_address, value=token_value)
         ethereum_erc_20_event_2 = EthereumEventFactory(from_=safe_address, value=token_value)
+        token = TokenFactory(address=ethereum_erc_20_event.address)
         response = self.client.get(reverse('v1:transfers', args=(safe_address,)), format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 4)
@@ -1117,6 +1175,7 @@ class TestViews(SafeTestCaseMixin, APITestCase):
              'tokenId': None,
              'tokenAddress': ethereum_erc_20_event_2.address,
              'from': safe_address,
+             'tokenInfo': None,
              },
             {'type': TransferType.ERC20_TRANSFER.name,
              'executionDate': ethereum_erc_20_event.ethereum_tx.block.timestamp.isoformat().replace('+00:00', 'Z'),
@@ -1126,7 +1185,15 @@ class TestViews(SafeTestCaseMixin, APITestCase):
              'value': str(token_value),
              'tokenId': None,
              'tokenAddress': ethereum_erc_20_event.address,
-             'from': ethereum_erc_20_event.arguments['from']
+             'from': ethereum_erc_20_event.arguments['from'],
+             'tokenInfo': {
+                 'type': 'ERC20',
+                 'address': token.address,
+                 'name': token.name,
+                 'symbol': token.symbol,
+                 'decimals': token.decimals,
+                 'logoUri': token.get_full_logo_uri(),
+             },
              },
             {'type': TransferType.ETHER_TRANSFER.name,
              'executionDate': internal_tx_2.ethereum_tx.block.timestamp.isoformat().replace('+00:00', 'Z'),
@@ -1137,6 +1204,7 @@ class TestViews(SafeTestCaseMixin, APITestCase):
              'tokenId': None,
              'tokenAddress': None,
              'from': safe_address,
+             'tokenInfo': None,
              },
             {'type': TransferType.ETHER_TRANSFER.name,
              'executionDate': internal_tx.ethereum_tx.block.timestamp.isoformat().replace('+00:00', 'Z'),
@@ -1147,6 +1215,7 @@ class TestViews(SafeTestCaseMixin, APITestCase):
              'tokenId': None,
              'tokenAddress': None,
              'from': internal_tx._from,
+             'tokenInfo': None,
              },
         ]
         self.assertEqual(response.json()['results'], expected_results)
@@ -1168,6 +1237,7 @@ class TestViews(SafeTestCaseMixin, APITestCase):
             'tokenId': str(token_id),
             'tokenAddress': ethereum_erc_721_event_2.address,
             'from': safe_address,
+            'tokenInfo': None,
         }, {
             'type': TransferType.ERC721_TRANSFER.name,
             'executionDate': ethereum_erc_721_event.ethereum_tx.block.timestamp.isoformat(
@@ -1178,7 +1248,8 @@ class TestViews(SafeTestCaseMixin, APITestCase):
             'value': None,
             'tokenId': str(token_id),
             'tokenAddress': ethereum_erc_721_event.address,
-            'from': ethereum_erc_721_event.arguments['from']
+            'from': ethereum_erc_721_event.arguments['from'],
+            'tokenInfo': None,
         }] + expected_results
         self.assertEqual(response.json()['results'], expected_results)
 

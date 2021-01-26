@@ -19,12 +19,13 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from web3 import Web3
 
+from safe_transaction_service.tokens.models import Token
 from safe_transaction_service.version import __version__
 
 from . import filters, pagination, serializers
 from .models import (InternalTx, ModuleTransaction, MultisigConfirmation,
                      MultisigTransaction, SafeContract, SafeContractDelegate,
-                     SafeMasterCopy, SafeStatus)
+                     SafeMasterCopy, SafeStatus, TransferDict)
 from .services import (BalanceServiceProvider, SafeServiceProvider,
                        TransactionServiceProvider)
 from .services.collectibles_service import CollectiblesServiceProvider
@@ -45,6 +46,8 @@ class AboutView(APIView):
             'api_version': self.request.version,
             'secure': self.request.is_secure(),
             'settings': {
+                'AWS_CONFIGURED': settings.AWS_CONFIGURED,
+                'AWS_S3_CUSTOM_DOMAIN': settings.AWS_S3_CUSTOM_DOMAIN,
                 'ETHEREUM_NODE_URL': settings.ETHEREUM_NODE_URL,
                 'ETHEREUM_TRACING_NODE_URL': settings.ETHEREUM_TRACING_NODE_URL,
                 'ETH_INTERNAL_TXS_BLOCK_PROCESS_LIMIT': settings.ETH_INTERNAL_TXS_BLOCK_PROCESS_LIMIT,
@@ -79,16 +82,18 @@ class AllTransactionsListView(ListAPIView):
     pagination_class = pagination.SmallPagination
     serializer_class = serializers._AllTransactionsSchemaSerializer  # Just for docs, not used
 
-    _schema_queued_param = openapi.Parameter('queued', openapi.IN_QUERY, type=openapi.TYPE_BOOLEAN, default=False,
+    _schema_queued_param = openapi.Parameter('executed', openapi.IN_QUERY, type=openapi.TYPE_BOOLEAN, default=False,
+                                             description='If `True` only executed transactions are returned')
+    _schema_queued_param = openapi.Parameter('queued', openapi.IN_QUERY, type=openapi.TYPE_BOOLEAN, default=True,
                                              description='If `True` transactions with `nonce >= Safe current nonce` '
-                                                         'are also shown')
+                                                         'are also returned')
     _schema_trusted_param = openapi.Parameter('trusted', openapi.IN_QUERY, type=openapi.TYPE_BOOLEAN, default=True,
                                               description='If `True` just trusted transactions are shown (indexed, '
                                                           'added by a delegate or with at least one confirmation)')
     _schema_200_response = openapi.Response('A list with every element with the structure of one of these transaction'
                                             'types', serializers._AllTransactionsSchemaSerializer)
 
-    def get_parameters(self) -> Tuple[bool, bool]:
+    def get_parameters(self) -> Tuple[bool, bool, bool]:
         """
         Parse query parameters:
         - queued: Default, True. If `queued=True` transactions with `nonce >= Safe current nonce` are also shown
@@ -96,15 +101,17 @@ class AllTransactionsListView(ListAPIView):
         or with at least one confirmation)
         :return: Tuple with queued, trusted
         """
+        executed = parse_boolean_query_param(self.request.query_params.get('executed', False))
         queued = parse_boolean_query_param(self.request.query_params.get('queued', True))
         trusted = parse_boolean_query_param(self.request.query_params.get('trusted', True))
-        return queued, trusted
+        return executed, queued, trusted
 
     def list(self, request, *args, **kwargs):
         transaction_service = TransactionServiceProvider()
         safe = self.kwargs['address']
-        queued, trusted = self.get_parameters()
-        queryset = self.filter_queryset(transaction_service.get_all_tx_hashes(safe, queued=queued, trusted=trusted))
+        executed, queued, trusted = self.get_parameters()
+        queryset = self.filter_queryset(transaction_service.get_all_tx_hashes(safe, executed=executed,
+                                                                              queued=queued, trusted=trusted))
         page = self.paginate_queryset(queryset)
 
         if not page:
@@ -194,7 +201,7 @@ class SafeMultisigConfirmationsView(ListCreateAPIView):
         """
         return super().get(request, *args, **kwargs)
 
-    @swagger_auto_schema(responses={202: 'Accepted',
+    @swagger_auto_schema(responses={201: 'Created',
                                     400: 'Malformed data',
                                     422: 'Error processing data'})
     def post(self, request, *args, **kwargs):
@@ -447,7 +454,7 @@ class SafeDelegateDestroyView(DestroyAPIView):
 class SafeTransferListView(ListAPIView):
     filter_backends = (django_filters.rest_framework.DjangoFilterBackend,)
     filterset_class = filters.TransferListFilter
-    serializer_class = serializers.TransferResponseSerializer
+    serializer_class = serializers.TransferWithTokenInfoResponseSerializer
     pagination_class = pagination.DefaultPagination
 
     def list(self, request, *args, **kwargs):
@@ -463,6 +470,14 @@ class SafeTransferListView(ListAPIView):
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
 
+    def add_tokens_to_transfers(self, transfers: TransferDict) -> TransferDict:
+        tokens = {token.address: token
+                  for token in Token.objects.filter(address__in={transfer['token_address'] for transfer in transfers
+                                                                 if transfer['token_address']})}
+        for transfer in transfers:
+            transfer['token'] = tokens.get(transfer['token_address'])
+        return transfers
+
     def get_transfers(self, address: str):
         tokens_queryset = super().filter_queryset(InternalTx.objects.token_txs_for_address(address))
         ether_queryset = super().filter_queryset(InternalTx.objects.ether_txs_for_address(address))
@@ -470,7 +485,7 @@ class SafeTransferListView(ListAPIView):
 
     def get_queryset(self):
         address = self.kwargs['address']
-        return self.get_transfers(address)
+        return self.add_tokens_to_transfers(self.get_transfers(address))
 
     @swagger_auto_schema(responses={200: serializers.TransferResponseSerializer(many=True),
                                     422: 'Safe address checksum not valid'})
@@ -498,7 +513,8 @@ class SafeCreationView(APIView):
 
     @swagger_auto_schema(responses={200: serializer_class(),
                                     404: 'Safe creation not found',
-                                    422: 'Owner address checksum not valid'})
+                                    422: 'Owner address checksum not valid',
+                                    503: 'Problem connecting to Ethereum network'})
     @method_decorator(cache_page(60 * 60))  # 1 hour
     def get(self, request, address, *args, **kwargs):
         """
@@ -507,12 +523,15 @@ class SafeCreationView(APIView):
         if not Web3.isChecksumAddress(address):
             return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
-        safe_creation_info = SafeServiceProvider().get_safe_creation_info(address)
-        if not safe_creation_info:
-            return Response(status=status.HTTP_404_NOT_FOUND)
+        try:
+            safe_creation_info = SafeServiceProvider().get_safe_creation_info(address)
+            if not safe_creation_info:
+                return Response(status=status.HTTP_404_NOT_FOUND)
 
-        serializer = self.serializer_class(safe_creation_info)
-        return Response(status=status.HTTP_200_OK, data=serializer.data)
+            serializer = self.serializer_class(safe_creation_info)
+            return Response(status=status.HTTP_200_OK, data=serializer.data)
+        except IOError:
+            return Response(status=status.HTTP_503_SERVICE_UNAVAILABLE, data='Problem connecting to Ethereum network')
 
 
 class SafeInfoView(APIView):

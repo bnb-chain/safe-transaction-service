@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import List, Optional, Sequence
 
+from django.db.models import Q
+
 import requests
 from cache_memoize import cache_memoize
 from cachetools import TTLCache, cachedmethod
@@ -99,7 +101,7 @@ class BalanceService:
         :return: ERC20 tokens filtered by spam or trusted
         """
         base_queryset = Token.objects.filter(
-            address__in=erc20_addresses
+            Q(address__in=erc20_addresses) | Q(events_bugged=True)
         ).order_by('name')
         if only_trusted:
             addresses = list(base_queryset.erc20().filter(trusted=True).values_list('address', flat=True))
@@ -110,10 +112,11 @@ class BalanceService:
             addresses_set = set(erc20_addresses)
             addresses = []
             for token in base_queryset:
-                if token.is_erc20() and not (exclude_spam and token.spam):
+                if token.is_erc20():
                     addresses.append(token.address)
-                addresses_set.remove(token.address)
-            # Add unkown addresses
+                if token.address in addresses_set:  # events_bugged tokens might not be on the `addresses_set`
+                    addresses_set.remove(token.address)
+            # Add unknown addresses
             addresses.extend(addresses_set)
 
         return addresses
@@ -238,21 +241,15 @@ class BalanceService:
         """
         Return current ether value for a given `token_address`
         """
-        try:
-            return self.kyber_oracle.get_price(token_address)
-        except OracleException:
-            logger.warning('Cannot get eth value for token-address=%s from Kyber, trying Uniswap V2', token_address)
+        for oracle in (self.kyber_oracle, self.uniswap_v2_oracle, self.uniswap_oracle):
+            try:
+                return oracle.get_price(token_address)
+            except OracleException:
+                logger.info('Cannot get eth value for token-address=%s from %s, trying Uniswap V2', token_address,
+                            oracle.__class__.__name__)
 
-        try:
-            return self.uniswap_v2_oracle.get_price(token_address)
-        except OracleException:
-            logger.warning('Cannot get eth value for token-address=%s on Uniswap V2, trying Uniswap', token_address)
-
-        try:
-            return self.uniswap_oracle.get_price(token_address)
-        except OracleException:
-            logger.warning('Cannot get eth value for token-address=%s on Uniswap', token_address)
-            return 0.
+        logger.warning('Cannot find eth value for token-address=%s', token_address)
+        return 0.
 
     @cachedmethod(cache=operator.attrgetter('cache_token_info'))
     @cache_memoize(60 * 60 * 24, prefix='balances-get_token_info')  # 1 day

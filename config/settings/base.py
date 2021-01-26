@@ -76,6 +76,7 @@ THIRD_PARTY_APPS = [
     'drf_yasg',
 ]
 LOCAL_APPS = [
+    'safe_transaction_service.contracts.apps.ContractsConfig',
     'safe_transaction_service.history.apps.HistoryConfig',
     'safe_transaction_service.notifications.apps.NotificationsConfig',
     'safe_transaction_service.tokens.apps.TokensConfig',
@@ -87,6 +88,7 @@ INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 # ------------------------------------------------------------------------------
 # https://docs.djangoproject.com/en/dev/ref/settings/#middleware
 MIDDLEWARE = [
+    'safe_transaction_service.history.utils.LoggingMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -240,6 +242,9 @@ LOGGING = {
         },
     },
     'formatters': {
+        'short': {
+            'format': '%(message)s'
+        },
         'verbose': {
             'format': '%(asctime)s [%(levelname)s] [%(processName)s] %(message)s'
         },
@@ -261,6 +266,10 @@ LOGGING = {
             'class': 'logging.StreamHandler',
             'formatter': 'verbose',
         },
+        'console_short': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'short',
+        },
         'celery_console': {
             'level': 'DEBUG',
             'filters': ['ignore_succeeded_none'],
@@ -273,6 +282,11 @@ LOGGING = {
             'handlers': ['console'],
             'level': 'INFO',
         },
+        'LoggingMiddleware': {
+            'handlers': ['console_short'],
+            'level': 'INFO',
+            'propagate': False,
+        },
         'safe_transaction_service.history.indexers.internal_tx_indexer': {
             'level': 'INFO',
         },
@@ -282,8 +296,11 @@ LOGGING = {
         'safe_transaction_service.history.indexers.tx_processor': {
             'level': 'INFO',
         },
+        'safe_transaction_service.history.services.balance_service': {
+            'level': 'WARNING',
+        },
         'safe_transaction_service.history.services.collectibles_service': {
-            'level': 'INFO',
+            'level': 'WARNING',
         },
         'celery': {
             'handlers': ['celery_console'],
@@ -342,3 +359,14 @@ if NOTIFICATIONS_FIREBASE_CREDENTIALS_PATH:
     NOTIFICATIONS_FIREBASE_AUTH_CREDENTIALS = json.load(
         environ.Path(NOTIFICATIONS_FIREBASE_CREDENTIALS_PATH).file('firebase-credentials.json')
     )
+
+
+# AWS S3 https://django-storages.readthedocs.io/en/latest/backends/amazon-S3.html
+AWS_ACCESS_KEY_ID = env('AWS_ACCESS_KEY_ID', default=None)
+AWS_QUERYSTRING_AUTH = False  # Remove query parameter authentication from generated URLs
+AWS_S3_CUSTOM_DOMAIN = env('AWS_S3_CUSTOM_DOMAIN', default=None)  # Set custom domain for file urls (like cloudfront)
+AWS_SECRET_ACCESS_KEY = env('AWS_SECRET_ACCESS_KEY', default=None)
+AWS_STORAGE_BUCKET_NAME = env('AWS_STORAGE_BUCKET_NAME', default=None)
+AWS_CONFIGURED = bool(AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY and AWS_STORAGE_BUCKET_NAME)
+
+ETHERSCAN_API_KEY = env('ETHERSCAN_API_KEY', default=None)

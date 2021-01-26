@@ -2,6 +2,9 @@ import logging
 import operator
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import urljoin
+
+from django.db.models import Q
 
 import requests
 from cache_memoize import cache_memoize
@@ -113,6 +116,7 @@ class CollectiblesService:
     }
     ENS_IMAGE_FILENAME = 'ENS.png'
     ENS_IMAGE_URL = f'https://gnosis-safe-token-logos.s3.amazonaws.com/{ENS_IMAGE_FILENAME}'
+    IPFS_GATEWAY = 'https://ipfs.io/'
 
     def __init__(self, ethereum_client: EthereumClient):
         self.ethereum_client = ethereum_client
@@ -131,6 +135,9 @@ class CollectiblesService:
         :param uri: Uri starting with the protocol, like http://example.org/token/3
         :return: Metadata as a decoded json
         """
+        if uri and uri.startswith('ipfs://'):
+            uri = urljoin(self.IPFS_GATEWAY, uri.replace('ipfs://', ''))  # Use ipfs gateway
+
         if not uri or not uri.startswith('http'):
             raise MetadataRetrievalException(uri)
 
@@ -152,8 +159,8 @@ class CollectiblesService:
             if token_address in self.CRYPTO_KITTIES_CONTRACT_ADDRESSES:
                 token_metadata_uri = f'https://api.cryptokitties.co/kitties/{token_id}'
             else:
-                logger.warning('Not available token_uri to retrieve metadata for ERC721 token=%s with token-id=%d',
-                               token_address, token_id, exc_info=True)
+                logger.info('Not available token_uri to retrieve metadata for ERC721 token=%s with token-id=%d',
+                            token_address, token_id)
         name = token_info.name if token_info else ''
         symbol = token_info.symbol if token_info else ''
         logo_uri = token_info.logo_uri if token_info else ''
@@ -176,19 +183,29 @@ class CollectiblesService:
         :param addresses_with_token_ids:
         :param only_trusted:
         :param exclude_spam:
-        :return: ERC20 tokens filtered by spam or trusted
+        :return: ERC721 tokens filtered by spam or trusted
         """
-        if only_trusted or exclude_spam:
-            addresses = [address_with_token_id[0] for address_with_token_id in addresses_with_token_ids]
-            base_queryset = Token.objects.filter(address__in=addresses)
-            if only_trusted:
-                addresses = base_queryset.filter(trusted=True).values_list('address', flat=True)
-            elif exclude_spam:
-                addresses = base_queryset.filter(spam=False).values_list('address', flat=True)
-            return [address_with_token_id for address_with_token_id in addresses_with_token_ids
-                    if address_with_token_id[0] in addresses]
+        addresses_set = {address_with_token_id[0] for address_with_token_id in addresses_with_token_ids}
+        base_queryset = Token.objects.filter(
+            Q(address__in=addresses_set) | Q(events_bugged=True)
+        ).order_by('name')
+        if only_trusted:
+            addresses = list(base_queryset.erc721().filter(trusted=True).values_list('address', flat=True))
+        elif exclude_spam:
+            addresses = list(base_queryset.erc721().filter(spam=False).values_list('address', flat=True))
         else:
-            return addresses_with_token_ids
+            # There could be some addresses that are not in the list
+            addresses = set()
+            for token in base_queryset:
+                if token.is_erc721():
+                    addresses.add(token.address)
+                if token.address in addresses_set:  # events_bugged tokens might not be on the `addresses_set`
+                    addresses_set.remove(token.address)
+            # Add unknown addresses
+            addresses.union(addresses_set)
+
+        return [address_with_token_id for address_with_token_id in addresses_with_token_ids
+                if address_with_token_id[0] in addresses]
 
     def get_collectibles(self, safe_address: str, only_trusted: bool = False,
                          exclude_spam: bool = False) -> List[Collectible]:
