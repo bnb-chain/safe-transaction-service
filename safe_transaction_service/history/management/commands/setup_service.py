@@ -135,18 +135,19 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.SUCCESS('Task %s was already created' % task.name))
 
         self.stdout.write(self.style.SUCCESS('Setting up Safe Contract Addresses'))
-        ethereum_client = EthereumClientProvider()
-        ethereum_network = ethereum_client.get_network()
-        if ethereum_network in MASTER_COPIES:
-            self.stdout.write(self.style.SUCCESS(f'Setting up {ethereum_network.name} safe addresses'))
-            self._setup_safe_master_copies(MASTER_COPIES[ethereum_network])
-        if ethereum_network in PROXY_FACTORIES:
-            self.stdout.write(self.style.SUCCESS(f'Setting up {ethereum_network.name} proxy factory addresses'))
-            self._setup_safe_proxy_factories(PROXY_FACTORIES[ethereum_network])
+        self.setup_my_network()
 
-        if not (ethereum_network in MASTER_COPIES and ethereum_network in PROXY_FACTORIES):
-            self.stdout.write(self.style.WARNING('Cannot detect a valid ethereum-network'))
-
+    def setup_my_network(self):
+        SafeMasterCopy.objects.get_or_create(address='0x2BB001433cf04c1f7d71E3c40FED66b2b563065E',
+                                             defaults={
+                                                 'initial_block_number': 93666,
+                                                 'tx_block_number': 93666,
+                                             })
+        ProxyFactory.objects.get_or_create(address='0x7A32D4Df6D7aFf9B3b975452518b4be38D8f6D6F',
+                                           defaults={
+                                               'initial_block_number': 93672,
+                                               'tx_block_number': 93672,
+                                       })
     def _setup_safe_master_copies(self, safe_master_copies: Sequence[Tuple[str, int, str]]):
         for address, initial_block_number, version in safe_master_copies:
             safe_master_copy, _ = SafeMasterCopy.objects.get_or_create(
