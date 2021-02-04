@@ -26,6 +26,6 @@ RUN set -ex \
 
 COPY . .
 RUN DJANGO_SETTINGS_MODULE=config.settings.local DJANGO_DOT_ENV_FILE=.env_local python manage.py collectstatic --noinput
-COPY FROM=nginx:slim /usr/sbin/nginx /usr/sbin/
+COPY FROM=nginx:stable /usr/sbin/nginx /usr/sbin/
 
 ENTRYPOINT ["/tini", "--"]
