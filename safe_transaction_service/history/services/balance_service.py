@@ -197,7 +197,7 @@ class BalanceService:
         :return: current USD price for ethereum using Kraken
         :raises: CannotGetEthereumPrice
         """
-        return self._get_binance_price('ETHUSDT')
+        return self._get_binance_price('BNBUSDT')
 
     def get_eth_usd_price_kraken(self) -> float:
         """
@@ -230,10 +230,7 @@ class BalanceService:
         elif self.ethereum_network in (EthereumNetwork.ENERGY_WEB_CHAIN, EthereumNetwork.VOLTA):
             return self.get_ewt_usd_price_kucoin()
         else:
-            try:
-                return self.get_eth_usd_price_kraken()
-            except CannotGetEthereumPrice:
-                return self.get_eth_usd_price_binance()
+            return self.get_eth_usd_price_binance()
 
     @cachedmethod(cache=operator.attrgetter('cache_token_eth_value'))
     @cache_memoize(60 * 30, prefix='balances-get_token_eth_value')  # 30 minutes
