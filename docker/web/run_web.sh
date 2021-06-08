@@ -18,4 +18,4 @@ echo "==> $(date +%H:%M:%S) ==> Send via Slack info about service version and ne
 python manage.py send_slack_notification &
 
 echo "==> $(date +%H:%M:%S) ==> Running Gunicorn... "
-exec gunicorn --config gunicorn.conf.py --pythonpath "$PWD" -b unix:$DOCKER_SHARED_DIR/gunicorn.socket -b 0.0.0.0:8888 config.wsgi:application
+exec gunicorn -k gevent --threads 4 --workers 5  --config gunicorn.conf.py --pythonpath "$PWD" -b unix:$DOCKER_SHARED_DIR/gunicorn.socket -b 0.0.0.0:8888 config.wsgi:application
