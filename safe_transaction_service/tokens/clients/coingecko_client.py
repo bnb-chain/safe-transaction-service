@@ -93,9 +93,14 @@ class CoingeckoClient(BaseHTTPClient):
         :return: usd price for token address, 0. if not found
         """
         token_address = token_address.lower()
+        if token_address == "0x3AB4E696E31173409dbfBb1FEB5b9A7cC55A212c".lower():
+            token_address = "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+
+        if token_address == "0x584f7b986d9942B0859a1E6921efA5342A673d04".lower():
+            token_address = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
         url = urljoin(
             self.base_url,
-            f"api/v3/simple/token_price/{self.asset_platform}?contract_addresses={token_address}&vs_currencies=usd",
+            f"api/v3/simple/token_price/ethereum?contract_addresses={token_address}&vs_currencies=usd",
         )
         return self._get_price(url, token_address)
 

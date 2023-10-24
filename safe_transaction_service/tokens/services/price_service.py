@@ -203,6 +203,15 @@ class PriceService:
     def get_mtr_usd_price(self) -> float:
         return self.coingecko_client.get_mtr_usd_price()
 
+    def get_btc_usd_price(self) -> float:
+        return self.coingecko_client.get_btc_usd_price()
+
+    def get_tusd_usd_price(self) -> float:
+        return self.coingecko_client.get_btc_usd_price()
+
+    def get_fdusd_usd_price(self) -> float:
+        return self.coingecko_client.get_btc_usd_price()
+
     @cachedmethod(cache=operator.attrgetter("cache_ether_usd_price"))
     @cache_memoize(60 * 30, prefix="balances-get_ether_usd_price")  # 30 minutes
     def get_ether_usd_price(self) -> float:
@@ -321,7 +330,7 @@ class PriceService:
         :return: Current ether value for a given `token_address`
         """
         if token_address in (
-            "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",  # Used by some oracles
+            "0x584f7b986d9942B0859a1E6921efA5342A673d04",  # Used by some oracles
             NULL_ADDRESS,
         ):  # Ether
             return 1.0
@@ -371,12 +380,13 @@ class PriceService:
         :param token_address:
         :return: usd value for a given `token_address` using Coingecko
         """
+
         if self.coingecko_client.supports_network(self.ethereum_network):
             try:
                 return self.coingecko_client.get_token_price(token_address)
             except CannotGetPrice:
                 pass
-        return 0.0
+        return 1.0
 
     @cachedmethod(cache=operator.attrgetter("cache_underlying_token"))
     @cache_memoize(60 * 30, prefix="balances-get_underlying_tokens")  # 30 minutes
@@ -466,11 +476,14 @@ class PriceService:
         :param token_address
         :return: Token/Ether price from oracles
         """
-        return (
-            self.get_token_eth_value(token_address)
-            or self.get_token_usd_price(token_address)
-            / self.get_native_coin_usd_price()
-        )
+
+        # return (
+        #     self.get_token_eth_value(token_address)
+        #     or self.get_token_usd_price(token_address)
+        #     / self.get_native_coin_usd_price()
+        # )
+
+        return self.get_token_usd_price(token_address) / self.get_native_coin_usd_price()
 
     def get_token_eth_price_from_composed_oracles(
         self, token_address: ChecksumAddress

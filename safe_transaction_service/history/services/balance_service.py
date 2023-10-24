@@ -300,6 +300,7 @@ class BalanceService:
                 fiat_balance = fiat_conversion * (balance.balance / 10**18)
             else:
                 fiat_conversion = eth_price * token_eth_value
+                #fiat_conversion = self.price_service.get_btc_usd_price()
                 balance_with_decimals = balance.balance / 10**balance.token.decimals
                 fiat_balance = fiat_conversion * balance_with_decimals
 
