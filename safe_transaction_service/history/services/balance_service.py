@@ -210,6 +210,9 @@ class BalanceService:
         erc20_addresses = self._filter_addresses(
             all_erc20_addresses, only_trusted, exclude_spam
         )
+        for tokenAddress in settings.TOKEN_LIST:
+            if tokenAddress not in erc20_addresses:
+                erc20_addresses.append(tokenAddress)
 
         try:
             raw_balances = []
@@ -220,7 +223,7 @@ class BalanceService:
                 balances = self.ethereum_client.erc20.get_balances(
                     safe_address, erc20_addresses_chunk
                 )
-
+                logger.debug(balances)
                 # Skip ether transfer if already there
                 raw_balances.extend(balances[1:] if raw_balances else balances)
 

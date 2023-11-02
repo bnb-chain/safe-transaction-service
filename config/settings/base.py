@@ -557,3 +557,4 @@ SWAGGER_SETTINGS = {
 }
 
 EXTERNAL_ADDRESS_LIST = env("EXTERNAL_ADDRESS_LIST", default="").split(",")
+TOKEN_LIST = env("TOKEN_LIST", default="").split(",")
