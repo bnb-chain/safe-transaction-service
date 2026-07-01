@@ -1,11 +1,13 @@
 import base64
 import dataclasses
+import ipaddress
 import json
 import logging
 import operator
 import random
+import socket
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from django.conf import settings
 from django.core.cache import cache as django_cache
@@ -156,6 +158,10 @@ class CollectiblesService:
         60 * 60 * 24 * 2
     )  # Keep collectibles by 2 days in cache
     TOKEN_EXPIRATION = int(60 * 60)
+    # SSRF protection: only these schemes may be fetched, and redirects are
+    # followed manually so every hop can be re-validated
+    METADATA_ALLOWED_SCHEMES = ("http", "https")
+    METADATA_MAX_REDIRECTS = 5
 
     def __init__(self, ethereum_client: EthereumClient, redis: Redis):
         self.ethereum_client = ethereum_client
@@ -188,6 +194,57 @@ class CollectiblesService:
                 # json.loads can raise a JSONDecodeError (inherits from ValueError)
                 return None
 
+    def _check_uri_against_ssrf(self, uri: str) -> None:
+        """
+        SSRF guard executed before every outbound metadata request (including
+        each redirect hop). It enforces the allowed schemes and, critically,
+        resolves the hostname and rejects the request if *any* resolved address
+        is not a globally-routable public IP. This blocks fetches aimed at
+        loopback, private (RFC1918), link-local (incl. the cloud metadata
+        endpoint ``169.254.169.254``), shared/CGNAT, and other reserved ranges.
+
+        Resolution is done with :func:`socket.getaddrinfo`, the same resolver
+        the request will use, so obfuscated hosts (e.g. integer/octal IPs) are
+        normalised the same way and cannot slip past this check.
+
+        :param uri: URL about to be requested
+        :raises MetadataRetrievalException: if the URL must not be requested
+        """
+        parsed = urlparse(uri)
+        if parsed.scheme not in self.METADATA_ALLOWED_SCHEMES:
+            raise MetadataRetrievalException(
+                f"Scheme={parsed.scheme!r} is not allowed for uri={uri}"
+            )
+
+        hostname = parsed.hostname
+        if not hostname:
+            raise MetadataRetrievalException(f"Missing hostname for uri={uri}")
+
+        try:
+            address_info = socket.getaddrinfo(hostname, parsed.port or None)
+        except (socket.gaierror, UnicodeError, ValueError) as exc:
+            raise MetadataRetrievalException(
+                f"Cannot resolve hostname for uri={uri}"
+            ) from exc
+
+        for *_, sockaddr in address_info:
+            # sockaddr[0] may carry an IPv6 scope id (e.g. ``fe80::1%eth0``)
+            ip = ipaddress.ip_address(sockaddr[0].split("%")[0])
+            if not ip.is_global or any(
+                (
+                    ip.is_private,
+                    ip.is_loopback,
+                    ip.is_link_local,
+                    ip.is_reserved,
+                    ip.is_multicast,
+                    ip.is_unspecified,
+                )
+            ):
+                raise MetadataRetrievalException(
+                    f"Address={ip} resolved for uri={uri} is not a public IP, "
+                    f"blocked to prevent SSRF"
+                )
+
     def _retrieve_metadata_from_uri(self, uri: str) -> Any:
         """
         Get metadata from URI. IPFS, HTTP/S, and BASE64/JSON are supported
@@ -204,40 +261,68 @@ class CollectiblesService:
 
         uri = ipfs_to_http(uri)
 
-        if not uri.startswith("http"):
+        if not uri or not uri.startswith("http"):
             raise MetadataRetrievalException(uri)
 
+        # Follow redirects manually with `allow_redirects=False` so every hop is
+        # validated by the SSRF guard; automatic redirects could otherwise be
+        # used to bounce from a public URL to an internal address.
+        session = requests.Session()
         try:
-            logger.debug("Getting metadata for uri=%s", uri)
-            with requests.get(uri, timeout=10, stream=True) as response:
-                if not response.ok:
-                    logger.debug("Cannot get metadata for uri=%s", uri)
-                    raise MetadataRetrievalException(uri)
+            current_uri = uri
+            for _ in range(self.METADATA_MAX_REDIRECTS + 1):
+                self._check_uri_against_ssrf(current_uri)
+                logger.debug("Getting metadata for uri=%s", current_uri)
+                response = session.get(
+                    current_uri, timeout=10, stream=True, allow_redirects=False
+                )
 
-                content_length = response.headers.get("content-length", 0)
-                content_type = response.headers.get("content-type", "")
-                if int(content_length) > self.METADATA_MAX_CONTENT_LENGTH:
-                    raise MetadataRetrievalException(
-                        f"Content-length={content_length} for uri={uri} is too big"
-                    )
+                if response.is_redirect:
+                    location = response.headers.get("location")
+                    response.close()
+                    if not location:
+                        raise MetadataRetrievalException(
+                            f"Redirect without location header for uri={uri}"
+                        )
+                    # Resolve relative redirects against the current URL
+                    current_uri = urljoin(current_uri, location)
+                    continue
 
-                if "application/json" not in content_type:
-                    raise MetadataRetrievalException(
-                        f"Content-type={content_type} for uri={uri} is not valid, "
-                        f'expected "application/json"'
-                    )
+                with response:
+                    if not response.ok:
+                        logger.debug("Cannot get metadata for uri=%s", uri)
+                        raise MetadataRetrievalException(uri)
 
-                logger.debug("Got metadata for uri=%s", uri)
+                    content_length = response.headers.get("content-length", 0)
+                    content_type = response.headers.get("content-type", "")
+                    if int(content_length) > self.METADATA_MAX_CONTENT_LENGTH:
+                        raise MetadataRetrievalException(
+                            f"Content-length={content_length} for uri={uri} is too big"
+                        )
 
-                # Some requests don't provide `Content-Length` on the headers
-                if len(response.content) > self.METADATA_MAX_CONTENT_LENGTH:
-                    raise MetadataRetrievalException(
-                        f"Retrieved content for uri={uri} is too big"
-                    )
+                    if "application/json" not in content_type:
+                        raise MetadataRetrievalException(
+                            f"Content-type={content_type} for uri={uri} is not valid, "
+                            f'expected "application/json"'
+                        )
 
-                return response.json()
+                    logger.debug("Got metadata for uri=%s", uri)
+
+                    # Some requests don't provide `Content-Length` on the headers
+                    if len(response.content) > self.METADATA_MAX_CONTENT_LENGTH:
+                        raise MetadataRetrievalException(
+                            f"Retrieved content for uri={uri} is too big"
+                        )
+
+                    return response.json()
+
+            raise MetadataRetrievalException(
+                f"Too many redirects retrieving metadata for uri={uri}"
+            )
         except (IOError, ValueError) as e:
             raise MetadataRetrievalExceptionTimeout(uri) from e
+        finally:
+            session.close()
 
     def build_collectible(
         self,

@@ -421,3 +421,70 @@ class TestCollectiblesService(EthereumTestCaseMixin, TestCase):
         uri = "data:application/json;base64,eyJ0b2tlbiI6"
         with self.assertRaisesMessage(MetadataRetrievalException, uri):
             collectibles_service._retrieve_metadata_from_uri(uri)
+
+    def test_retrieve_metadata_from_uri_ssrf_scheme(self):
+        collectibles_service = CollectiblesServiceProvider()
+
+        # Only http/https may be fetched; other schemes must be rejected before
+        # any request is made
+        for uri in (
+            "gopher://internal/_",
+            "file:///etc/passwd",
+            "ftp://example.org/x.json",
+        ):
+            with self.assertRaises(MetadataRetrievalException):
+                collectibles_service._retrieve_metadata_from_uri(uri)
+
+    def test_retrieve_metadata_from_uri_ssrf_non_public_ip(self):
+        collectibles_service = CollectiblesServiceProvider()
+
+        # URLs resolving to a non-public address must be blocked (SSRF), so the
+        # request against internal/cloud-metadata endpoints is never sent
+        non_public_addresses = [
+            "127.0.0.1",  # loopback
+            "10.1.2.3",  # RFC1918 private
+            "192.168.0.5",  # RFC1918 private
+            "172.16.5.4",  # RFC1918 private
+            "169.254.169.254",  # link-local / cloud metadata endpoint
+            "100.64.0.1",  # shared / CGNAT
+            "0.0.0.0",  # unspecified
+        ]
+        for address in non_public_addresses:
+            with mock.patch(
+                "safe_transaction_service.history.services.collectibles_service"
+                ".socket.getaddrinfo",
+                return_value=[(2, 1, 6, "", (address, 80))],
+            ):
+                with self.assertRaisesMessage(MetadataRetrievalException, "SSRF"):
+                    collectibles_service._retrieve_metadata_from_uri(
+                        "https://attacker.example/metadata.json"
+                    )
+
+    def test_retrieve_metadata_from_uri_ssrf_redirect(self):
+        collectibles_service = CollectiblesServiceProvider()
+
+        # A redirect from an allowed public host to an internal address must be
+        # re-validated and blocked
+        redirect_response = MagicMock()
+        redirect_response.is_redirect = True
+        redirect_response.headers = {
+            "location": "http://169.254.169.254/latest/meta-data/"
+        }
+
+        with mock.patch(
+            "safe_transaction_service.history.services.collectibles_service"
+            ".socket.getaddrinfo",
+            side_effect=[
+                [(2, 1, 6, "", ("93.184.216.34", 443))],  # public host -> allowed
+                [(2, 1, 6, "", ("169.254.169.254", 80))],  # redirect -> blocked
+            ],
+        ), mock.patch(
+            "safe_transaction_service.history.services.collectibles_service"
+            ".requests.Session.get",
+            return_value=redirect_response,
+        ):
+            with self.assertRaisesMessage(MetadataRetrievalException, "SSRF"):
+                collectibles_service._retrieve_metadata_from_uri(
+                    "https://public.example/metadata.json"
+                )
+        redirect_response.close.assert_called_once()
