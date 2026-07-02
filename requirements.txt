@@ -22,6 +22,10 @@ docutils==0.20.1
 drf-yasg[validation]==1.21.7
 firebase-admin==6.2.0
 flower==2.0.1
+# Pin gevent explicitly: it is pulled transitively via gunicorn[gevent]/django-db-geventpool
+# and left unpinned it resolves to a newer release incompatible with django-db-geventpool==4.0.1
+# + Django 4.2.4 (breaks connection thread-affinity -> DatabaseError on every request).
+gevent==23.9.1
 gunicorn[gevent]==21.2.0
 hexbytes==0.3.1
 hiredis==2.2.3
