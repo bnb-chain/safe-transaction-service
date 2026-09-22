@@ -72,6 +72,10 @@ class TestViews(SafeTestCaseMixin, APITestCase):
         url = reverse("v1:history:about")
         response = self.client.get(url, format="json")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            set(response.data), {"name", "version", "api_version"}
+        )
+        self.assertNotIn("settings", response.data)
 
     def test_swagger_json_schema(self):
         url = reverse("schema-json", args=(".json",))

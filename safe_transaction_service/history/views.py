@@ -65,7 +65,10 @@ logger = logging.getLogger(__name__)
 
 class AboutView(APIView):
     """
-    Returns information and configuration of the service
+    Returns public, non-sensitive service metadata.
+
+    Runtime configuration can contain credentials and internal infrastructure
+    details, so it must never be included in a public API response.
     """
 
     renderer_classes = (JSONRenderer,)
@@ -76,28 +79,6 @@ class AboutView(APIView):
             "name": "Safe Transaction Service",
             "version": __version__,
             "api_version": request.version,
-            "secure": request.is_secure(),
-            "host": request.get_host(),
-            "headers": [x for x in request.META.keys() if "FORWARD" in x],
-            "settings": {
-                "AWS_CONFIGURED": settings.AWS_CONFIGURED,
-                "AWS_S3_PUBLIC_URL": settings.AWS_S3_PUBLIC_URL,
-                "ETHEREUM_NODE_URL": settings.ETHEREUM_NODE_URL,
-                "ETHEREUM_TRACING_NODE_URL": settings.ETHEREUM_TRACING_NODE_URL,
-                "ETH_EVENTS_BLOCK_PROCESS_LIMIT": settings.ETH_EVENTS_BLOCK_PROCESS_LIMIT,
-                "ETH_EVENTS_BLOCK_PROCESS_LIMIT_MAX": settings.ETH_EVENTS_BLOCK_PROCESS_LIMIT_MAX,
-                "ETH_EVENTS_QUERY_CHUNK_SIZE": settings.ETH_EVENTS_QUERY_CHUNK_SIZE,
-                "ETH_EVENTS_UPDATED_BLOCK_BEHIND": settings.ETH_EVENTS_UPDATED_BLOCK_BEHIND,
-                "ETH_INTERNAL_NO_FILTER": settings.ETH_INTERNAL_NO_FILTER,
-                "ETH_INTERNAL_TRACE_TXS_BATCH_SIZE": settings.ETH_INTERNAL_TRACE_TXS_BATCH_SIZE,
-                "ETH_INTERNAL_TXS_BLOCK_PROCESS_LIMIT": settings.ETH_INTERNAL_TXS_BLOCK_PROCESS_LIMIT,
-                "ETH_L2_NETWORK": settings.ETH_L2_NETWORK,
-                "ETH_REORG_BLOCKS": settings.ETH_REORG_BLOCKS,
-                "NOTIFICATIONS_FIREBASE_CREDENTIALS_PATH": settings.NOTIFICATIONS_FIREBASE_CREDENTIALS_PATH,
-                "SSO_ENABLED": settings.SSO_ENABLED,
-                "TOKENS_LOGO_BASE_URI": settings.TOKENS_LOGO_BASE_URI,
-                "TOKENS_LOGO_EXTENSION": settings.TOKENS_LOGO_EXTENSION,
-            },
         }
         return Response(content)
 
